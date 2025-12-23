@@ -1,0 +1,18 @@
+{
+  "profiles": {
+    "MqttDataProcessor": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "dotnetRunMessages": true
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker",
+      "environmentVariables": {
+        "ASPNETCORE_USERSECRETSID": "dotnet-MqttDataProcessor-5566a1df-51aa-4e7c-a929-7614e94aab71"
+      }   
+    }
+  },
+  "$schema": "http://json.schemastore.org/launchsettings.json"
+}
