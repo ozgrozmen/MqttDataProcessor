@@ -1,100 +1,78 @@
-﻿using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using MqttDataProcessor.Interfaces;
+﻿using MqttDataProcessor.Interfaces;
 using MqttDataProcessor.Models;
-using Microsoft.Extensions.DependencyInjection;
-using System.Diagnostics;
-using Microsoft.AspNetCore.SignalR; // YENİ: SignalR kütüphanesi
-using MqttDataProcessor.Hubs;      // YENİ: Oluşturacağınız Hub klasörü
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using System;
+using System.Linq;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace MqttDataProcessor.Services
+namespace MqttDataProcessor.Workers
 {
     public class BatchWriterService : BackgroundService
     {
-        private readonly ILogger<BatchWriterService> _logger;
         private readonly IDataBuffer<SensorData> _dataBuffer;
-        private readonly IServiceScopeFactory _scopeFactory;
-        private readonly IHubContext<SensorHub> _hubContext; // YENİ: Hub context'i ekledik
+        private readonly IDataRepository _repository;
+        private readonly ILogger<BatchWriterService> _logger;
 
-        private const int BATCH_SIZE = 5000;
-        private readonly TimeSpan _maxWaitTime = TimeSpan.FromSeconds(60);
+        private const int BATCH_SIZE = 8300;
+        private DateTime _lastWriteTime = DateTime.UtcNow;
 
-        public BatchWriterService(ILogger<BatchWriterService> logger,
-                                  IDataBuffer<SensorData> dataBuffer,
-                                  IServiceScopeFactory scopeFactory,
-                                  IHubContext<SensorHub> hubContext) // YENİ: DI ile inject ettik
+        public BatchWriterService(
+            IDataBuffer<SensorData> dataBuffer,
+            IDataRepository repository,
+            ILogger<BatchWriterService> logger)
         {
-            _logger = logger;
             _dataBuffer = dataBuffer;
-            _scopeFactory = scopeFactory;
-            _hubContext = hubContext; // YENİ
+            _repository = repository;
+            _logger = logger;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("BatchWriterService (EF Core, GC & SignalR Optimized) başladı.");
+            _logger.LogInformation("BatchWriterService aktif. Kesin paket boyutu: {Size}", BATCH_SIZE);
 
-            var batch = new List<SensorData>(BATCH_SIZE);
-            var stopwatch = Stopwatch.StartNew();
-
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                while (await _dataBuffer.Reader.WaitToReadAsync(stoppingToken))
-                {
-                    while (_dataBuffer.Reader.TryRead(out var data))
-                    {
-                        batch.Add(data);
-
-                        if (batch.Count >= BATCH_SIZE || stopwatch.Elapsed >= _maxWaitTime)
-                        {
-                            await WriteToDbAndNotifyAsync(batch); // Metot adını güncelledik
-                            stopwatch.Restart();
-                        }
-                    }
-
-                    if (batch.Count > 0 && stopwatch.Elapsed >= _maxWaitTime)
-                    {
-                        await WriteToDbAndNotifyAsync(batch); // Metot adını güncelledik
-                        stopwatch.Restart();
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogInformation("BatchWriterService durduruluyor...");
-                if (batch.Count > 0) await WriteToDbAndNotifyAsync(batch);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogCritical(ex, "BatchWriterService beklenmedik bir hata ile durdu!");
-            }
-        }
-
-        private async Task WriteToDbAndNotifyAsync(List<SensorData> batch)
-        {
-            using (var scope = _scopeFactory.CreateScope())
-            {
-                var repository = scope.ServiceProvider.GetRequiredService<IDataRepository>();
-
                 try
                 {
-                    // 1. Veritabanına Kayıt (Mevcut mantığın)
-                    await repository.SaveBatchSensorDataAsync(batch);
-                    _logger.LogInformation("{Count} adet veri veritabanına başarıyla aktarıldı.", batch.Count);
+                    // Sadece tamponda 1000 ve üzeri veri varsa işlem yap
+                    if (_dataBuffer.Count >= BATCH_SIZE)
+                    {
+                        // Tampondaki her şeyi al
+                        var allData = _dataBuffer.GetDataForBatch().ToList();
 
-                    // 2. Dashboard'a Bildirim (YENİ)
-                    // Veriyi olduğu gibi gönderiyoruz. 
-                    // İstersen performans için batch'in tamamı yerine sadece ilk 10 kaydı veya özetini gönderebilirsin.
-                    await _hubContext.Clients.All.SendAsync("ReceiveSensorBatch", batch);
+                        // Veriyi 1000'lik parçalara böl
+                        var chunks = allData.Chunk(BATCH_SIZE).ToList();
+
+                        foreach (var chunk in chunks)
+                        {
+                            // Eğer parça tam 1000 ise yaz
+                            if (chunk.Length == BATCH_SIZE)
+                            {
+                                await _repository.SaveBatchSensorDataAsync(chunk);
+                                _logger.LogInformation(">>> [BULK INSERT SUCCESS] {Count} adet kayıt işlendi. Saat: {Time}",
+                                    chunk.Length, DateTime.Now.ToString("HH:mm:ss"));
+                            }
+                            else
+                            {
+                                // 1000'den az kalan artığı (Örn: 137 veri) tampona geri ekle
+                                foreach (var item in chunk)
+                                {
+                                    _dataBuffer.Add(item);
+                                }
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Veritabanına yazma veya Dashboard bildirimi sırasında hata!");
+                    _logger.LogError("Batch yazma hatası: {Message}", ex.Message);
                 }
-                finally
-                {
-                    batch.Clear();
-                }
+
+                // Çok hızlı döngüye girip CPU tüketmemesi için kısa bekleme
+                await Task.Delay(100, stoppingToken);
             }
         }
     }

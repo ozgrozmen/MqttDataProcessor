@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿/*
+ using Microsoft.AspNetCore.Mvc;
 using MqttDataProcessor.Interfaces;
 using MqttDataProcessor.Models;
 using System.Runtime.InteropServices;
@@ -25,3 +26,5 @@ namespace MqttDataProcessor.Controllers
         }
     }
 }
+
+*/

@@ -1,35 +1,54 @@
 ﻿using System.Threading.Channels;
 using MqttDataProcessor.Interfaces;
 using MqttDataProcessor.Models;
+using System.Collections.Generic; // IEnumerable ve List için
 
 namespace MqttDataProcessor.Data
 {
     public class DataBuffer : IDataBuffer<SensorData>
     {
-        // Channel, ConcurrentBag'e göre çok daha performanslı ve bellek dostudur
         private readonly Channel<SensorData> _channel;
 
         public DataBuffer()
         {
-            // BoundedChannel: Bellek şişmesini önlemek için kapasite sınırı koyar
+            // Kanal seçenekleri: 10.000 veri kapasiteli
             var options = new BoundedChannelOptions(10000)
             {
-                FullMode = BoundedChannelFullMode.Wait, // Kapasite dolarsa yazarı bekletir, RAM'i korur
-                SingleReader = true, // Veriyi sadece BatchWriter okuyacağı için optimizasyon sağlar
-                SingleWriter = false // MQTT Worker'lar birden fazla thread üzerinden yazabilir
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false
             };
             _channel = Channel.CreateBounded<SensorData>(options);
         }
 
-        // Kanalın okuyucu kısmını dışarı açıyoruz
+        // Arayüzle uyumlu olması için Reader özelliğini koruyoruz
         public ChannelReader<SensorData> Reader => _channel.Reader;
 
-        public void AddData(SensorData data)
+        // Arayüzde 'Add' olarak güncellediğimiz için ismi değiştirdik
+        public void Add(SensorData data)
         {
-            _channel.Writer.TryWrite(data);
+            if (data != null)
+            {
+                _channel.Writer.TryWrite(data);
+            }
         }
 
-        public int Count => _channel.Reader.Count;
+        // BatchWriterService'in hata vermesine sebep olan EKSİK METOT:
+        // Kanal içindeki tüm birikmiş verileri bir kerede çeker ve listeye boşaltır.
+        public IEnumerable<SensorData> GetDataForBatch()
+        {
+            var batch = new List<SensorData>();
 
+            // Kanalda okunmayı bekleyen veri olduğu sürece çek (Non-blocking)
+            while (_channel.Reader.TryRead(out var item))
+            {
+                batch.Add(item);
+            }
+
+            return batch;
+        }
+
+        // Gerektiğinde kanalın doluluk oranını görmek için
+        public int Count => _channel.Reader.Count;
     }
 }

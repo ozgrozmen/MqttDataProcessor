@@ -5,6 +5,8 @@ using MQTTnet.Client;
 using MqttDataProcessor.Interfaces;
 using System.Text;
 
+namespace MqttDataProcessor.Workers;
+
 public class MqttSubscriberWorker : BackgroundService
 {
     private readonly ILogger<MqttSubscriberWorker> _logger;
@@ -19,8 +21,6 @@ public class MqttSubscriberWorker : BackgroundService
         _logger = logger;
         _configuration = configuration;
         _dataBuffer = dataBuffer;
-
-        // Optimizasyon: Her seferinde yeni options oluşturmamak için constructor'da tanımlıyoruz
         _jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
     }
 
@@ -30,15 +30,26 @@ public class MqttSubscriberWorker : BackgroundService
         var mqttClient = factory.CreateMqttClient();
 
         var mqttSettings = _configuration.GetSection("MqttSettings");
+        var host = mqttSettings["BrokerHost"] ?? "localhost";
+        var port = int.Parse(mqttSettings["BrokerPort"] ?? "1883");
+        var topic = mqttSettings["Topic"] ?? "#";
+
         var options = new MqttClientOptionsBuilder()
-            .WithTcpServer(mqttSettings["BrokerHost"], int.Parse(mqttSettings["BrokerPort"]!))
+            .WithTcpServer(host, port)
             .WithCleanSession()
             .Build();
 
-        // [DÜZELTME] Asenkron event handler yapısı
+        // MESAJ GELDİĞİNDE: Artık her mesajda log basmıyoruz, sadece işleyip buffer'a atıyoruz.
         mqttClient.ApplicationMessageReceivedAsync += e =>
         {
-            HandleMessage(e); // Senkron veya asenkron yönetim
+            HandleMessage(e);
+            return Task.CompletedTask;
+        };
+
+        // BAĞLANTI KONTROLLERİ: Bunlar önemli olduğu için logda kalmalı.
+        mqttClient.DisconnectedAsync += e =>
+        {
+            _logger.LogWarning("MQTT Bağlantısı koptu! Yeniden bağlanmaya çalışılıyor...");
             return Task.CompletedTask;
         };
 
@@ -48,16 +59,17 @@ public class MqttSubscriberWorker : BackgroundService
             {
                 if (!mqttClient.IsConnected)
                 {
+                    _logger.LogInformation("MQTT Broker'a bağlanılıyor: {Host}:{Port}...", host, port);
                     await mqttClient.ConnectAsync(options, stoppingToken);
-                    var topic = mqttSettings["Topic"];
                     await mqttClient.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic(topic).Build());
-                    _logger.LogInformation($"MQTT broker'a bağlandı: {topic}");
+                    _logger.LogInformation("Bağlantı Başarılı. Konu dinleniyor: {Topic}", topic);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "MQTT bağlantı hatası.");
+                _logger.LogError("MQTT Bağlantı Hatası: {Message}", ex.Message);
             }
+
             await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
         }
     }
@@ -66,28 +78,31 @@ public class MqttSubscriberWorker : BackgroundService
     {
         try
         {
-            // Bu işlem "Heap" üzerinde gereksiz string kopyaları oluşmasını engeller.
-            var rawData = JsonSerializer.Deserialize<SensorData>(e.ApplicationMessage.PayloadSegment, _jsonOptions);
+            var payload = e.ApplicationMessage.PayloadSegment;
+            if (payload.Count == 0) return;
+
+            var rawData = JsonSerializer.Deserialize<SensorData>(payload, _jsonOptions);
+            if (rawData == null) return;
 
             var topic = e.ApplicationMessage.Topic;
             var parts = topic.Split('/');
             var deviceId = parts.Length > 1 ? parts[1] : "unknown";
 
-            // 2. Readonly Struct Kullanımı: Değerleri Constructor (Yapıcı Metot) ile atıyoruz
-            var data = new SensorData(
-                deviceId,
-                rawData?.Temperature ?? 0,
-                rawData?.Humidity ?? 0,
-                DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
-            );
+            var data = new SensorData
+            {
+                DeviceId = deviceId,
+                Temperature = rawData.Temperature,
+                Humidity = rawData.Humidity,
+                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
+            };
 
-            _dataBuffer.AddData(data);
-
-            // Performans Notu: Çok yüksek frekanslı veride LogInformation'ı kapatmak CPU'yu rahatlatır.
+            // Veriyi toplu yazılmak üzere sessizce buffer'a ekliyoruz.
+            _dataBuffer.Add(data);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Mesaj işleme hatası.");
+            // Ayrıştırma hatası gibi kritik durumları hala logluyoruz.
+            _logger.LogError("Mesaj işleme hatası: {Message}", ex.Message);
         }
     }
 }

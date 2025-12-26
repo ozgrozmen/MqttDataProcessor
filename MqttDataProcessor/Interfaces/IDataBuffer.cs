@@ -1,25 +1,17 @@
-﻿using System.Threading.Channels;
+﻿using System.Collections.Generic;
 using MqttDataProcessor.Models;
 
 namespace MqttDataProcessor.Interfaces
 {
-    /// <summary>
-    /// Verileri MQTT'den alıp DB'ye yazılana kadar bellekte güvenli bir şekilde 
-    /// kanal (Channel) yapısı ile tutan tampon arayüzü.
-    /// </summary>
     public interface IDataBuffer<T>
     {
-        // [KRİTİK]: BatchWriterService'in verileri okuyabilmesi için bu tanım şarttır.
-        // Channel, veriyi okunduğu anda otomatik olarak tampondan temizler.
-        ChannelReader<T> Reader { get; }
+        // MqttSubscriberWorker'ın veri eklemesi için
+        void Add(T item);
 
-        // Gelen veriyi kanala (tampona) eklemek için kullanılan metot.
-        void AddData(T data);
+        // BatchWriterService'in verileri toplu çekip tamponu boşaltması için
+        IEnumerable<T> GetDataForBatch();
 
-        // Tampondaki anlık veri sayısını izlemek için özellik.
+        // BatchWriterService'in eşik kontrolü (1000 veri doldu mu?) yapabilmesi için
         int Count { get; }
-
-        // NOT: GetDataForBatch ve ClearBatch metotları kanal yapısında 
-        // gereksiz olduğu için kaldırılmıştır.
     }
 }

@@ -1,9 +1,9 @@
 ﻿using MqttDataProcessor.Interfaces;
 using MqttDataProcessor.Models;
-using MqttDataProcessor.Data;
-using EFCore.BulkExtensions;
+using Npgsql;
+using NpgsqlTypes;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,81 +13,63 @@ namespace MqttDataProcessor.Data
 {
     public class PostgreSqlRepository : IDataRepository
     {
-        private readonly AppDbContext _context;
+        private readonly string _connectionString;
         private readonly ILogger<PostgreSqlRepository> _logger;
 
-        public PostgreSqlRepository(AppDbContext context, ILogger<PostgreSqlRepository> logger)
+        public PostgreSqlRepository(IConfiguration configuration, ILogger<PostgreSqlRepository> logger)
         {
-            _context = context;
+            _connectionString = configuration.GetConnectionString("DefaultConnection")
+                                ?? throw new InvalidOperationException("PostgreSQL bağlantı dizesi bulunamadı.");
             _logger = logger;
-            _context.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
         }
 
+        // Tekli kayıt metodu (Gerektiğinde hala kullanılabilir)
         public async Task SaveSensorDataAsync(SensorData data)
         {
-            try
-            {
-                if (data == null) return;
-
-                // [DÜZELTME] string olan Timestamp'i Parse edip DateTime'a çeviriyoruz
-                if (DateTime.TryParse(data.Timestamp, out DateTime parsedDate))
-                {
-                    data.ProcessedTimestamp = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
-                }
-                else
-                {
-                    data.ProcessedTimestamp = DateTime.UtcNow;
-                }
-
-                await _context.SensorReading.AddAsync(data);
-                await _context.SaveChangesAsync();
-                _context.ChangeTracker.Clear();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Tekli veri kayıt hatası.");
-            }
+            await SaveBatchSensorDataAsync(new List<SensorData> { data });
         }
 
+        // --- ASIL BULK INSERT METODU ---
         public async Task SaveBatchSensorDataAsync(IEnumerable<SensorData> dataBatch)
         {
             if (dataBatch == null || !dataBatch.Any()) return;
 
-            var list = dataBatch is List<SensorData> l ? l : dataBatch.ToList();
-
             try
             {
-                foreach (var item in list)
+                await using var connection = new NpgsqlConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // PostgreSQL Binary COPY komutu: INSERT'ten kat kat daha hızlıdır.
+                // Tablo ve sütun isimlerinin DB ile birebir aynı (büyük/küçük harf) olduğundan emin olun.
+                string copyCommand = @"
+                    COPY public.""SensorReading"" (timestamp, sensor_id, temperature, humidity) 
+                    FROM STDIN (FORMAT BINARY)";
+
+                await using var writer = connection.BeginBinaryImport(copyCommand);
+
+                foreach (var data in dataBatch)
                 {
-                    // [DÜZELTME] Güvenli Parse ve UTC dönüşümü
-                    if (!string.IsNullOrEmpty(item.Timestamp) && DateTime.TryParse(item.Timestamp, out DateTime pDate))
+                    // Tarih dönüşümü (UTC formatına zorla)
+                    DateTime timestampValue = DateTime.UtcNow;
+                    if (!string.IsNullOrEmpty(data.Timestamp) && DateTime.TryParse(data.Timestamp, out DateTime parsedDate))
                     {
-                        item.ProcessedTimestamp = DateTime.SpecifyKind(pDate, DateTimeKind.Utc);
+                        timestampValue = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
                     }
-                    else
-                    {
-                        item.ProcessedTimestamp = DateTime.UtcNow;
-                    }
+
+                    await writer.StartRowAsync();
+                    await writer.WriteAsync(timestampValue, NpgsqlDbType.TimestampTz);
+                    await writer.WriteAsync(data.DeviceId ?? "Unknown", NpgsqlDbType.Varchar);
+                    await writer.WriteAsync(data.Temperature, NpgsqlDbType.Double);
+                    await writer.WriteAsync(data.Humidity, NpgsqlDbType.Double);
                 }
 
-                var bulkConfig = new BulkConfig
-                {
-                    PreserveInsertOrder = false,
-                    BatchSize = 5000,
-                    EnableShadowProperties = false,
-                    CalculateStats = false
-                };
-
-                await _context.BulkInsertAsync(list, bulkConfig);
+                // Verileri veritabanına fiziksel olarak işle (Commit)
+                await writer.CompleteAsync();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "BulkInsert (Toplu Yazma) hatası oluştu.");
+                _logger.LogError(ex, "Bulk Insert (COPY) işlemi sırasında hata oluştu: {Message}", ex.Message);
                 throw;
-            }
-            finally
-            {
-                _context.ChangeTracker.Clear();
             }
         }
     }

@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿/*
+
+using Microsoft.EntityFrameworkCore;
 using MqttDataProcessor.Models;
 
 namespace MqttDataProcessor.Data
@@ -13,3 +15,5 @@ namespace MqttDataProcessor.Data
         public DbSet<SensorData> SensorReading { get; set; }
     }
 }
+
+*/
